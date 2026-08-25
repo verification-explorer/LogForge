@@ -3,7 +3,7 @@
 ## Project Name: LogForge
 ## Target: Core Specification for Claude Code Autonomous Implementation
 
-**Revision 2 — 2026-08-25.** Revision 1 (`5db7b7e`) was structurally corrupted and
+**Revision 2.1 — 2026-08-25.** Revision 1 (`5db7b7e`) was structurally corrupted and
 contained unresolved ambiguities. See Appendix A for every change and its rationale.
 
 ---
@@ -24,6 +24,10 @@ unmeasurable, so nothing could be tested or regressed against it. This figure is
 one number in this document not derivable from Revision 1 — treat it as provisional
 and reset it once real measurements exist.
 
+**Bulk insert strategy:** rows are inserted in batches of 5,000 within a single
+transaction per file. Rationale: balances memory footprint against transaction
+overhead; a 1M-line file commits once, not 200 times or 1M times.
+
 ---
 
 ## 2. Technical Stack & Constraints
@@ -31,9 +35,13 @@ and reset it once real measurements exist.
 * **Language:** Python 3.12+ (strict type hinting required on all functions)
 * **Package & Environment Manager:** `uv` (Astral)
 * **Code Quality:** `ruff` for formatting and linting
-* **Type Checking:** `mypy` in strict mode
-* **Testing Framework:** `pytest` with `pytest-cov`. Line coverage of `src/logforge/`
-  must exceed 90%; the build fails below that threshold.
+* **Type Checking:** `mypy` in strict mode, with `disallow_any_explicit = true` in
+  `pyproject.toml`. Rationale: without this flag, a function typed `Any -> Any` passes
+  strict mode and defeats the purpose.
+* **Testing Framework:** `pytest` with `pytest-cov`. Branch coverage of `src/logforge/`
+  must exceed 90%; the build fails below that threshold. Rationale: line coverage is
+  satisfiable by importing every module without asserting anything; branch coverage
+  requires exercising both arms of conditionals.
 * **Database:** SQLite via the built-in `sqlite3` module. No ORM, no abstraction layer.
 * **CLI Engine:** `click`
 * **Version control:** test fixture log files are byte-exact inputs and must not be
@@ -71,14 +79,24 @@ The repository root is `LogForge/`; the importable package is `logforge`.
   * *Example line (Combined):*
     `127.0.0.1 - - [25/Aug/2026:14:32:10 +0000] "GET /api/v1/resource HTTP/1.1" 200 452 "https://example.com/" "curl/8.4.0"`
 * **Extraction Fields:**
-  * IP Address (IPv4 or IPv6, validated as a string)
+  * IP Address (IPv4 or IPv6). Validation uses `ipaddress.ip_address()` from the
+    standard library; any string that function rejects is a malformed line. Rationale:
+    regex cannot correctly validate IPv6 zone IDs or mapped addresses; the stdlib can.
   * Timestamp (parsed into a datetime, normalized to UTC)
-  * HTTP Method (`GET`, `POST`, `PUT`, `DELETE`, etc.)
+  * HTTP Method. One of the nine IANA-registered methods: `GET`, `POST`, `PUT`,
+    `DELETE`, `HEAD`, `OPTIONS`, `PATCH`, `CONNECT`, `TRACE`. Any other value is a
+    malformed line. Rationale: accepting arbitrary strings would allow garbage through
+    and complicate downstream analysis.
   * Requested Path (e.g. `/api/v1/resource`)
   * Status Code (integer, e.g. `200`, `404`, `500`)
   * Response Size (integer, bytes). A literal `-` in this field means zero bytes and
     is stored as `0`. Such a line is **valid** and must not be skipped.
 * **Line endings:** each line is stripped of trailing `\r` and `\n` before parsing.
+* **Malformed lines:** a line is malformed if it is blank (empty or whitespace-only),
+  begins with `#` (comment), or fails to match the CLF/Combined regex, or fails IP or
+  method validation. Blank and comment lines are skipped silently; regex and validation
+  failures emit warnings per the throttling rule below. Rationale: blank and comment
+  lines are intentional non-data; regex failures are corruption worth reporting.
 * **Resilience:** handle malformed or corrupted log rows gracefully by logging
   warnings to `stderr` and skipping the line instead of crashing the pipeline.
   Warnings are emitted at most once per 1,000 skipped lines, plus a final total on
@@ -89,6 +107,10 @@ The repository root is `LogForge/`; the importable package is `logforge`.
 * **Database:** local SQLite database file, initialized automatically if missing.
   Default location `./logforge.db`, overridable with the `LOGFORGE_DB` environment
   variable.
+* **Corrupt database:** if the file exists but is not a valid SQLite database (e.g.,
+  the header bytes do not match), `database.py` raises a descriptive error and the
+  command exits 1 without modifying the file. Rationale: silent overwrite would destroy
+  user data; silent skip would hide the problem.
 * **Schema:**
 
 ```sql
@@ -103,6 +125,10 @@ The repository root is `LogForge/`; the importable package is `logforge`.
       size           INTEGER NOT NULL
   );
 
+  CREATE INDEX idx_logs_status ON logs(status);
+  CREATE INDEX idx_logs_path   ON logs(path);
+  CREATE INDEX idx_logs_ip     ON logs(ip);
+
   CREATE TABLE ingested_files (
       id           INTEGER PRIMARY KEY AUTOINCREMENT,
       sha256       TEXT    NOT NULL UNIQUE,
@@ -115,9 +141,14 @@ The repository root is `LogForge/`; the importable package is `logforge`.
 
   Timestamps are stored as ISO 8601 TEXT in UTC, which sorts lexicographically in
   chronological order.
+
+  **Indexes:** `status`, `path`, and `ip` are indexed because every §3.3 metric groups
+  or filters on at least one of them. Without indexes the status breakdown, top-paths,
+  and top-IPs queries scan the full table — unacceptable once the database holds
+  millions of rows.
+
 * **Operations:**
-  * Bulk insertion, batched, to ensure efficient database writing for logs containing
-    thousands of rows.
+  * Bulk insertion in batches of 5,000 rows within a single transaction per file.
   * **Re-ingestion guard:** `ingest` computes the SHA-256 of the input file. If that
     hash is already present in `ingested_files`, the command is a no-op that reports
     the prior ingestion and exits 0. Duplicate *rows* are never suppressed.
@@ -129,13 +160,21 @@ The repository root is `LogForge/`; the importable package is `logforge`.
 * **Metrics Required:**
   * Total request count.
   * Total data transferred, in MB, where 1 MB = 1,000,000 bytes, to two decimals.
-  * Breakdown of HTTP status codes (number of 200s, 404s, 500s, and so on).
-  * Top 5 most requested URL paths, by request count.
-  * Top 5 most active IP addresses, by request count.
+  * Breakdown of HTTP status codes: every distinct status code present in the database
+    is reported with its count, sorted by status code ascending. Rationale: filtering
+    to a fixed set (200/404/500) would hide unexpected codes like 418 or 599.
+  * Top 5 most requested URL paths, by request count. If fewer than five distinct paths
+    exist, report all of them. Rationale: "Top 5" means "up to 5"; requiring exactly 5
+    would error on small datasets.
+  * Top 5 most active IP addresses, by request count. If fewer than five distinct IPs
+    exist, report all of them.
   * Ties in either "Top 5" are broken by ascending lexicographic order of the path or
     IP address, so output is deterministic.
 * **Output:** save analytical output into a nicely formatted Markdown report file at
   the path supplied by `--output`, defaulting to `report.md` in the current directory.
+  If the target path already exists, the file is overwritten without prompting.
+  Rationale: prompting would break scripted pipelines; refusing would require the user
+  to delete manually every time.
 
 ### 3.4. Command Line Interface (`cli.py`)
 
@@ -157,6 +196,26 @@ logforge clear --force
 ```
 
 * `cli.py` parses arguments and delegates; it contains no SQL.
+* `ingest`: if the input file does not exist or is not readable, print an error to
+  `stderr` and exit 1. Do not create or modify the database.
+* `stats`: prints a plain-text summary to `stdout` with the following format (one
+  metric per line, label and value separated by a colon and space):
+  ```
+  Requests: 12345
+  Data transferred: 67.89 MB
+  Status 200: 10000
+  Status 404: 2000
+  Status 500: 345
+  Top paths:
+    /api/v1/users: 5000
+    /api/v1/items: 3000
+    ...
+  Top IPs:
+    192.168.1.1: 4000
+    10.0.0.5: 2500
+    ...
+  ```
+  Rationale: machine-parseable output enables shell pipelines without requiring JSON.
 * `stats` and `report` against a missing or empty database print a message to `stderr`
   and exit 1. They do not create a database.
 * `--force` on `clear` is mandatory. Without it, the command prints the current record
@@ -213,3 +272,22 @@ written. Anything *outside* a fence was not.
 | S9 | MB definition | 1,000,000 bytes, two decimals |
 | S10 | Exit codes | 0 success, 1 handled error, 2 usage error |
 | S11 | Line endings on input | Trailing `\r` and `\n` stripped before parsing. A CRLF log read on a machine expecting LF would otherwise put `\r` inside the final field, making every line of a valid file look malformed |
+
+### A.4 Revision 2 audit — defects and gaps closed in Revision 2.1
+
+| ID | Issue | Decision |
+|---|---|---|
+| D1 | `mypy --strict` does not reject explicit `Any` annotations; every function could be `Any -> Any` | Added `disallow_any_explicit = true` to mypy config. Rationale: closes the loophole that would let an implementer defeat strict typing. |
+| D2 | Line coverage is satisfiable by a test that imports all modules and asserts nothing | Changed to branch coverage. Rationale: branch coverage requires exercising conditional paths, not just touching lines. |
+| G1 | Whether a literal `-` is valid for response size | Clarified: `-` is valid and stored as `0`. (Already in A.2 X5, now explicit in §3.1.) |
+| G2 | IP validation: IPv4 and IPv6 both required; how validation is performed | Use `ipaddress.ip_address()` from stdlib. Rationale: regex cannot correctly handle all IPv6 forms. |
+| G3 | HTTP method: whether any string is accepted or an enumerated set | Enumerated: the nine IANA-registered methods. Rationale: arbitrary strings would allow garbage. |
+| G4 | Status code breakdown: whether all observed codes are reported or only some | All distinct codes present, sorted ascending. Rationale: a fixed set hides unexpected codes. |
+| G5 | Top 5 queries: behavior when fewer than five distinct values exist | Report all that exist. Rationale: "Top 5" means "up to 5". |
+| G6 | What counts as a malformed line: blank lines, comment lines, partial matches | Blank and `#`-prefixed lines skipped silently; regex/validation failures warn per throttle rule. Rationale: blanks and comments are intentional. |
+| G7 | `stats`: the format of its stdout output | Specified label-colon-value format. Rationale: enables shell parsing without JSON. |
+| G8 | `report --output`: behavior when the target path already exists | Overwrite without prompting. Rationale: prompting breaks scripted pipelines. |
+| G9 | `ingest`: behavior when the input file does not exist or is not readable | Print error to `stderr`, exit 1, do not touch database. |
+| G10 | Bulk insert: batch size and transaction boundaries | 5,000-row batches, one transaction per file. Rationale: balances memory vs. commit overhead for the 25k lines/sec target. |
+| G11 | Behavior when `logforge.db` exists but is not a valid SQLite database | Raise descriptive error, exit 1, do not modify file. Rationale: silent overwrite destroys data. |
+| G12 | Indexes on the `logs` table | Indexes on `status`, `path`, `ip`. Rationale: every §3.3 metric groups or filters on these columns. |
