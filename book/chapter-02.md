@@ -13,7 +13,9 @@ uv run mypy src               # type check
 uv run pytest                 # test
 ```
 
-No implementation logic exists yet — only the skeleton that makes the package importable and the tooling runnable. The real deliverable is the `CLAUDE.md` file, and the insight this chapter teaches is that *shorter is better*. Every line in `CLAUDE.md` costs context tokens on every turn, forever. The test for keeping a line: does Claude Code get this wrong without being told?
+No implementation logic exists yet — only the skeleton that makes the package importable and the tooling runnable. The real deliverable is the `CLAUDE.md` file, and the thesis is this: **CLAUDE.md is a fixed cost paid at session start, on every session, forever.** It doesn't accumulate within a conversation — it's loaded once when the session begins. That's exactly why bloat is invisible and never gets fixed: you don't see a per-turn delta, so a 180-line file feels the same as an 11-line file during normal use. The cost shows up in aggregate — slower startup, earlier context exhaustion on long sessions, higher token bills across a team — but never in a way that points back at the file.
+
+The test for keeping a line: does Claude Code get this wrong without being told?
 
 ## 🧠 The decision
 
@@ -23,7 +25,7 @@ Which Claude Code primitive owns "project setup instructions"?
 
 **Not a hook.** Hooks execute shell commands before or after tool calls. You could hook `pre-commit` to run ruff, but hooks don't provide context — they enforce it. A hook that fails doesn't tell Claude *why* it failed or how to fix it; `CLAUDE.md` does.
 
-**Not spec.md restated.** The spec is 294 lines and already present in the repository. Copying it into `CLAUDE.md` doubles the context cost for zero information gain. Point at the spec; don't restate it.
+**Not spec.md restated.** The spec is 246 lines and already present in the repository. Copying it into `CLAUDE.md` doubles the context cost for zero information gain. Point at the spec; don't restate it.
 
 **Not tool documentation.** Claude Code already knows what ruff, mypy, and pytest do. Explaining them in `CLAUDE.md` is like explaining what git is to someone who just ran `git status`. The model has that knowledge; restating it burns tokens on every turn.
 
@@ -266,9 +268,9 @@ in a future release; use `dependency-groups.dev` instead
 
 Fixed by replacing `[tool.uv]` with `[dependency-groups]`. The warning was informative, the fix was mechanical, but it's noise that a current-practices check could have avoided.
 
-**The context measurement was harder than expected.** The task called for running `/context` before and after each `CLAUDE.md` version to quantify the difference. In practice, `CLAUDE.md` files are loaded at session start and their contribution doesn't change during a conversation — the `/context` numbers reflect the entire conversation state, not the marginal cost of one file.
+**The /context measurement didn't show what I expected.** I expected `/context` to show a per-turn delta between the bloated and lean versions. It doesn't work that way. `CLAUDE.md` is loaded at session start and stays constant — `/context` reflects the entire conversation state, not the marginal cost of one file. There's no row that says "CLAUDE.md: 1,200 tokens" to compare.
 
-What *is* observable: the bloated `CLAUDE.md` was 180 lines (approximately 4,200 characters, roughly 1,000-1,200 tokens). The lean version was 11 lines (approximately 340 characters, roughly 80-100 tokens). That's a 10-15x reduction loaded on every single turn.
+What *is* measurable: byte counts. The bloated version is 7,366 bytes; the lean version is 411 bytes. That's an 18x reduction in the fixed cost paid at every session start.
 
 **The A/B test showed no functional difference.** Both versions — bloated and lean — correctly handled "add a py.typed marker and confirm mypy still passes." The bloated version didn't cause errors; it just cost more. This is the sneaky failure mode of context bloat: it works, so you don't notice the waste. The cost shows up in slower responses, earlier context window exhaustion on long sessions, and money spent on tokens that added nothing.
 
@@ -282,7 +284,7 @@ The honest result: there was no observable quality difference on this simple tas
 
 - **The test for every line: does Claude get this wrong without being told?** If yes, keep it. If no, delete it. The two items that survived in LogForge's `CLAUDE.md` — "cli.py contains no SQL" and "test fixtures must not be line-ending normalized" — are architectural decisions that aren't obvious from reading the code and would cause real errors if assumed wrong.
 
-- **Context cost compounds.** A 180-line `CLAUDE.md` versus an 11-line one is 1,000+ extra tokens on every turn. Over a 50-turn session, that's 50,000 tokens spent saying things Claude already knew. On a project with multiple contributors running multiple sessions, it adds up.
+- **Context cost is fixed per session, not per turn.** A 7,366-byte `CLAUDE.md` versus a 411-byte one is ~7KB extra loaded once at session start. It doesn't compound within a conversation, but it does compound across sessions — every `claude` invocation pays the tax. On a project with multiple contributors running multiple sessions per day, a bloated `CLAUDE.md` costs real money for zero value.
 
 - **Verify the environment matches the spec.** Python version, installed tools, expected paths — check them before scaffolding, not after the first error.
 
