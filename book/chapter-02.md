@@ -25,7 +25,7 @@ Which Claude Code primitive owns "project setup instructions"?
 
 **Not a hook.** Hooks execute shell commands before or after tool calls. You could hook `pre-commit` to run ruff, but hooks don't provide context — they enforce it. A hook that fails doesn't tell Claude *why* it failed or how to fix it; `CLAUDE.md` does.
 
-**Not spec.md restated.** The spec is 246 lines and already present in the repository. Copying it into `CLAUDE.md` doubles the context cost for zero information gain. Point at the spec; don't restate it.
+**Not spec.md restated.** The spec is 293 lines (`wc -l spec.md`) and already present in the repository. Copying it into `CLAUDE.md` doubles the context cost for zero information gain. Point at the spec; don't restate it.
 
 **Not tool documentation.** Claude Code already knows what ruff, mypy, and pytest do. Explaining them in `CLAUDE.md` is like explaining what git is to someone who just ran `git status`. The model has that knowledge; restating it burns tokens on every turn.
 
@@ -254,6 +254,10 @@ Success: no issues found in 5 source files
 ```
 
 ## 🔥 What went wrong
+
+**The spec line count was wrong, then wronger.** The first draft of this chapter stated that `spec.md` is 294 lines. A review flagged it. The correction pass replaced 294 with 246 — a number from PowerShell's `Measure-Object`, which counts differently than `wc -l` — and the commit message claimed the count had been verified. It had not. The actual count is 293 (`wc -l spec.md`).
+
+A wrong fact labelled "corrected" is more dangerous than the original, because the label is what stops the next reader from checking. This is the same pattern Chapter 1 caught in item 18 of the requirement inventory: the spec file says `init.py`, and the inventory silently wrote `__init__.py` because it knew Python packages have `__init__.py`. Output that looks like it came from the source, produced without going to the source. The defense is the same one Chapter 1 landed on: run the command, quote what it prints.
 
 **The Python version mismatch.** The spec requires Python 3.12+, but the system had Python 3.10 installed. `uv init` wrote `.python-version` with `3.10`, and `uv sync` correctly refused to proceed. This is working as intended — the tooling caught the mismatch — but it required `uv python install 3.12` and `uv python pin 3.12` before the workspace was usable.
 
