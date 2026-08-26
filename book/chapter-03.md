@@ -317,6 +317,31 @@ The lesson: `/loop` is valuable when you expect iterative refinement (watching a
 
 This is the argument for spec-first testing: if the spec is complete, tests derived from it will naturally cover the implementation. The coverage gate validates that the spec (and thus the tests) didn't miss anything — but in this case, it didn't need to catch anything because the spec was already thorough. Chapter 4 will address what happens when the spec *isn't* thorough and the coverage gate has to do real work.
 
+**I committed lint violations to main and didn't notice.** `CLAUDE.md` — written in Chapter 2, in this repo, listing `uv run ruff check src tests` as the first quick command — instructs running ruff. Chapter 2 configured it: `line-length = 88`, `select = ["E", "F", "I", "W", "UP", "B", "SIM"]`. I did not run it before committing `4f4f77c` ("Add tests for parser.py derived from spec.md §3.1").
+
+Running ruff against that commit's `tests/test_parser.py` after the fact:
+
+```
+Found 19 errors.
+```
+
+Eleven `E501` (line too long, the worst at 135 characters against an 88-character limit), four `UP017` (`timezone.utc` instead of `datetime.UTC`), two `F401` (`pytest` and `ParseResult` imported but unused), one `I001` (unsorted imports). The stub in `src/logforge/parser.py` from the same commit was clean; every violation was in the test file.
+
+The line-wrapping in `e35fe7e` ("Implement parser.py — all tests green") looks like test churn in the diff, but it isn't. That commit's `tests/test_parser.py` diff is entirely ruff remediation — the long string literals split across implicit-concatenation parentheses, the unused imports dropped, `timezone.utc` swapped for its `UTC` alias, one long assertion extracted to a local named `corrupt`. Both versions define the same 13 test functions and contain the same 36 assertions. No expected value changed, no test case was added or removed, and `UTC` *is* `timezone.utc` — the same object under a newer name. Nothing about what the tests assert is different across those two commits.
+
+The gap between them, by committer date:
+
+```
+$ git log -1 --format=%ci 4f4f77c
+2026-08-26 10:50:42 +0300
+$ git log -1 --format=%ci e35fe7e
+2026-08-26 11:04:59 +0300
+```
+
+**14 minutes and 17 seconds.** For fourteen minutes, `main` held code that violated the project's own configured lint rules, and it was cleaned up only because the next commit happened to touch those same lines while I was chasing green tests. Not because anything told me to. The instruction to run ruff was sitting in `CLAUDE.md` the entire time. The commit succeeded. Nothing failed. Nothing warned.
+
+This is the gap Chapter 4 closes — an instruction in `CLAUDE.md` is advice, and advice is what you follow when you remember to.
+
 ## ✅ Takeaway
 
 - **Write tests from the spec, not from the implementation.** Each test docstring cites a spec clause. This creates traceability and ensures the tests verify requirements, not implementation details.
