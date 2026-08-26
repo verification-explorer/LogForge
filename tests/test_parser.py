@@ -1,10 +1,8 @@
 """Tests for parser.py, derived from spec.md §3.1 and Appendix A.4."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-import pytest
-
-from logforge.parser import parse_line, ParseResult
+from logforge.parser import parse_line
 
 
 class TestValidLines:
@@ -12,11 +10,14 @@ class TestValidLines:
 
     def test_clf_example_from_spec(self) -> None:
         """The CLF example line from §3.1 must parse correctly."""
-        line = '127.0.0.1 - - [25/Aug/2026:14:32:10 +0000] "GET /api/v1/resource HTTP/1.1" 200 452'
+        line = (
+            '127.0.0.1 - - [25/Aug/2026:14:32:10 +0000] '
+            '"GET /api/v1/resource HTTP/1.1" 200 452'
+        )
         result = parse_line(line)
         assert result is not None
         assert result.ip == "127.0.0.1"
-        assert result.timestamp == datetime(2026, 8, 25, 14, 32, 10, tzinfo=timezone.utc)
+        assert result.timestamp == datetime(2026, 8, 25, 14, 32, 10, tzinfo=UTC)
         assert result.method == "GET"
         assert result.path == "/api/v1/resource"
         assert result.status == 200
@@ -28,11 +29,15 @@ class TestValidLines:
         Combined's trailing fields (referrer, user-agent) are optional,
         parsed when present, and discarded per §3.1.
         """
-        line = '127.0.0.1 - - [25/Aug/2026:14:32:10 +0000] "GET /api/v1/resource HTTP/1.1" 200 452 "https://example.com/" "curl/8.4.0"'
+        line = (
+            '127.0.0.1 - - [25/Aug/2026:14:32:10 +0000] '
+            '"GET /api/v1/resource HTTP/1.1" 200 452 '
+            '"https://example.com/" "curl/8.4.0"'
+        )
         result = parse_line(line)
         assert result is not None
         assert result.ip == "127.0.0.1"
-        assert result.timestamp == datetime(2026, 8, 25, 14, 32, 10, tzinfo=timezone.utc)
+        assert result.timestamp == datetime(2026, 8, 25, 14, 32, 10, tzinfo=UTC)
         assert result.method == "GET"
         assert result.path == "/api/v1/resource"
         assert result.status == 200
@@ -61,9 +66,15 @@ class TestValidLines:
 
     def test_all_iana_methods(self) -> None:
         """All nine IANA-registered methods must be accepted per §3.1 and A.4 G3."""
-        methods = ["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "CONNECT", "TRACE"]
+        methods = [
+            "GET", "POST", "PUT", "DELETE", "HEAD",
+            "OPTIONS", "PATCH", "CONNECT", "TRACE",
+        ]
         for method in methods:
-            line = f'127.0.0.1 - - [25/Aug/2026:14:32:10 +0000] "{method} /api HTTP/1.1" 200 100'
+            line = (
+                f'127.0.0.1 - - [25/Aug/2026:14:32:10 +0000] '
+                f'"{method} /api HTTP/1.1" 200 100'
+            )
             result = parse_line(line)
             assert result is not None, f"Method {method} should be accepted"
             assert result.method == method
@@ -73,7 +84,10 @@ class TestValidLines:
 
         Per §3.1 (S11): trailing \\r and \\n are stripped before parsing.
         """
-        line = '127.0.0.1 - - [25/Aug/2026:14:32:10 +0000] "GET /api HTTP/1.1" 200 100\r\n'
+        line = (
+            '127.0.0.1 - - [25/Aug/2026:14:32:10 +0000] '
+            '"GET /api HTTP/1.1" 200 100\r\n'
+        )
         result = parse_line(line)
         assert result is not None
         assert result.path == "/api"
@@ -84,7 +98,10 @@ class TestMalformedLines:
 
     def test_non_iana_method_rejected(self) -> None:
         """Non-IANA HTTP methods are malformed per §3.1 and A.4 G3."""
-        line = '127.0.0.1 - - [25/Aug/2026:14:32:10 +0000] "INVALID /api HTTP/1.1" 200 100'
+        line = (
+            '127.0.0.1 - - [25/Aug/2026:14:32:10 +0000] '
+            '"INVALID /api HTTP/1.1" 200 100'
+        )
         result = parse_line(line)
         assert result is None
 
@@ -103,11 +120,15 @@ class TestMalformedLines:
         """Lines that don't match the CLF/Combined regex are malformed per §3.1."""
         assert parse_line("not a log line at all") is None
         assert parse_line("127.0.0.1 incomplete") is None
-        assert parse_line('127.0.0.1 - - [invalid timestamp] "GET / HTTP/1.1" 200 100') is None
+        corrupt = '127.0.0.1 - - [invalid timestamp] "GET / HTTP/1.1" 200 100'
+        assert parse_line(corrupt) is None
 
     def test_invalid_ip_rejected(self) -> None:
         """Invalid IP addresses are malformed per §3.1 and A.4 G2."""
-        line = 'not.an.ip.address - - [25/Aug/2026:14:32:10 +0000] "GET /api HTTP/1.1" 200 100'
+        line = (
+            'not.an.ip.address - - [25/Aug/2026:14:32:10 +0000] '
+            '"GET /api HTTP/1.1" 200 100'
+        )
         result = parse_line(line)
         assert result is None
 
@@ -122,7 +143,7 @@ class TestTimestampNormalization:
         result = parse_line(line)
         assert result is not None
         # 20:02:10 +0530 = 14:32:10 UTC
-        assert result.timestamp == datetime(2026, 8, 25, 14, 32, 10, tzinfo=timezone.utc)
+        assert result.timestamp == datetime(2026, 8, 25, 14, 32, 10, tzinfo=UTC)
 
     def test_negative_timezone_offset(self) -> None:
         """Negative timezone offsets are handled correctly."""
@@ -130,4 +151,4 @@ class TestTimestampNormalization:
         result = parse_line(line)
         assert result is not None
         # 09:32:10 -0500 = 14:32:10 UTC
-        assert result.timestamp == datetime(2026, 8, 25, 14, 32, 10, tzinfo=timezone.utc)
+        assert result.timestamp == datetime(2026, 8, 25, 14, 32, 10, tzinfo=UTC)
